@@ -5,7 +5,6 @@ Add evidence of your completed implementation here.
 Examples:
 
 - Screenshots
-- Short recording link
 - Relevant test output
 - Manual verification notes
 
