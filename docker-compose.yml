@@ -1,0 +1,5 @@
+# Optional starter file.
+# Candidates may replace or extend this with the messaging technology
+# they choose, provided the resulting architecture remains consistent
+# with Architecture.md.
+services: {}
