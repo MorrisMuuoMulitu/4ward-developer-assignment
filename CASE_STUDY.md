@@ -1,6 +1,6 @@
 # 4WARD.earth Developer Screening Case Study
 
-**Estimated time:** 2–2.5 hours  
+**Estimated time:** 5-6 hours  
 **Language:** TypeScript or Python  
 **Repository:** 
 
