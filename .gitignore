@@ -1,1 +1,23 @@
+# Local environment and secrets
+.env
+.env.*
+!.env.example
 
+# Dependencies and build output
+node_modules/
+dist/
+coverage/
+.vitest/
+
+# Runtime and tooling output
+*.log
+logs/
+test-results/
+playwright-report/
+.superpowers/
+
+# Editors and operating systems
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

@@ -1,5 +1,23 @@
-# Optional starter file.
-# Candidates may replace or extend this with the messaging technology
-# they choose, provided the resulting architecture remains consistent
-# with Architecture.md.
-services: {}
+services:
+  rabbitmq:
+    image: rabbitmq:4.4.1-management-alpine
+    container_name: 4ward-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:-guest}
+    ports:
+      - '5672:5672'
+      - '15672:15672'
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ['CMD', 'rabbitmq-diagnostics', '-q', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+volumes:
+  rabbitmq-data:
+    name: 4ward-rabbitmq-data
