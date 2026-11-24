@@ -1,16 +1,22 @@
 import { z } from 'zod';
 
 import type { CityGroupJoinedEvent } from '../../../shared/src/contracts.js';
-import { errorForHttpStatus, RetryableError, TerminalError } from '../../../shared/src/errors.js';
+import { errorForHttpStatus, TerminalError } from '../../../shared/src/errors.js';
+import {
+  DEFAULT_EXTERNAL_REQUEST_TIMEOUT_MS,
+  fetchWithTimeout,
+  type FetchLike,
+} from '../../../shared/src/http.js';
 import { transformForAirtable } from './transform.js';
 
-export type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
+export type { FetchLike } from '../../../shared/src/http.js';
 
 interface AirtableHandlerConfig {
   readonly apiKey: string;
   readonly baseId: string;
   readonly fetch?: FetchLike;
   readonly tableName: string;
+  readonly timeoutMs?: number;
 }
 
 const listResponseSchema = z.object({
@@ -29,14 +35,9 @@ async function request(
   fetchImplementation: FetchLike,
   url: string,
   init: RequestInit,
+  timeoutMs: number,
 ): Promise<Response> {
-  try {
-    return await fetchImplementation(url, init);
-  } catch (error) {
-    throw new RetryableError('Airtable request failed at the network layer.', {
-      cause: error,
-    });
-  }
+  return fetchWithTimeout(fetchImplementation, url, init, 'Airtable', timeoutMs);
 }
 
 /**
@@ -47,6 +48,7 @@ export function createAirtableHandler(
   config: AirtableHandlerConfig,
 ): (event: CityGroupJoinedEvent) => Promise<void> {
   const fetchImplementation = config.fetch ?? fetch;
+  const timeoutMs = config.timeoutMs ?? DEFAULT_EXTERNAL_REQUEST_TIMEOUT_MS;
   const baseUrl = endpoint(config);
   const headers = {
     Authorization: `Bearer ${config.apiKey}`,
@@ -59,10 +61,15 @@ export function createAirtableHandler(
       filterByFormula: formula,
       maxRecords: '1',
     });
-    const listResponse = await request(fetchImplementation, `${baseUrl}?${query.toString()}`, {
-      headers,
-      method: 'GET',
-    });
+    const listResponse = await request(
+      fetchImplementation,
+      `${baseUrl}?${query.toString()}`,
+      {
+        headers,
+        method: 'GET',
+      },
+      timeoutMs,
+    );
 
     if (!listResponse.ok) {
       throw errorForHttpStatus('Airtable', listResponse.status);
@@ -86,14 +93,19 @@ export function createAirtableHandler(
       return;
     }
 
-    const createResponse = await request(fetchImplementation, baseUrl, {
-      body: JSON.stringify({
-        fields: transformForAirtable(event),
-        typecast: false,
-      }),
-      headers,
-      method: 'POST',
-    });
+    const createResponse = await request(
+      fetchImplementation,
+      baseUrl,
+      {
+        body: JSON.stringify({
+          fields: transformForAirtable(event),
+          typecast: false,
+        }),
+        headers,
+        method: 'POST',
+      },
+      timeoutMs,
+    );
 
     if (!createResponse.ok) {
       throw errorForHttpStatus('Airtable', createResponse.status);

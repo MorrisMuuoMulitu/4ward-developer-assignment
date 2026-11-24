@@ -17,6 +17,8 @@ const environmentSchema = z.object({
   MAX_RETRY_ATTEMPTS: z.coerce.number().int().min(0).max(20).default(3),
   RETRY_INITIAL_DELAY_MS: z.coerce.number().int().min(1).max(60_000).default(1000),
   RETRY_MAX_DELAY_MS: z.coerce.number().int().min(1).max(300_000).default(30_000),
+  EXTERNAL_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(100).max(120_000).default(15_000),
+  SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).default(10_000),
   AIRTABLE_API_KEY: optionalStringSchema,
   AIRTABLE_BASE_ID: optionalStringSchema,
   AIRTABLE_TABLE_NAME: z.string().min(1).default('City Group Members'),
@@ -31,6 +33,7 @@ export interface RuntimeConfig {
   readonly port: number;
   readonly logLevel: 'fatal' | 'error' | 'warn' | 'info' | 'debug' | 'trace' | 'silent';
   readonly consumerPrefetch: number;
+  readonly shutdownTimeoutMs: number;
   readonly rabbitmq: {
     readonly url: string;
     readonly exchange: string;
@@ -48,6 +51,7 @@ export interface RuntimeConfig {
     readonly supabaseUrl: string | undefined;
     readonly supabaseSecretKey: string | undefined;
     readonly supabaseServiceRoleKey: string | undefined;
+    readonly requestTimeoutMs: number;
   };
 }
 
@@ -74,6 +78,7 @@ export function parseRuntimeConfig(environment: Record<string, string | undefine
     port: result.data.PORT,
     logLevel: result.data.LOG_LEVEL,
     consumerPrefetch: result.data.CONSUMER_PREFETCH,
+    shutdownTimeoutMs: result.data.SHUTDOWN_TIMEOUT_MS,
     rabbitmq: {
       url: result.data.RABBITMQ_URL,
       exchange: result.data.RABBITMQ_EXCHANGE,
@@ -91,6 +96,7 @@ export function parseRuntimeConfig(environment: Record<string, string | undefine
       supabaseUrl: result.data.SUPABASE_URL,
       supabaseSecretKey: result.data.SUPABASE_SECRET_KEY,
       supabaseServiceRoleKey: result.data.SUPABASE_SERVICE_ROLE_KEY,
+      requestTimeoutMs: result.data.EXTERNAL_REQUEST_TIMEOUT_MS,
     },
   };
 }

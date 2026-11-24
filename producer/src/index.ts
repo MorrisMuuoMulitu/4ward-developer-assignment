@@ -4,11 +4,12 @@ import { connect } from 'amqplib';
 
 import { parseRuntimeConfig } from '../../shared/src/config.js';
 import {
+  confirmChannelAdapter,
   EVENT_ROUTING_KEY,
   RabbitEventPublisher,
-  type ConfirmChannelLike,
 } from '../../shared/src/rabbit-publisher.js';
 import { logStartupFailure } from '../../shared/src/logger.js';
+import { createDeadline, createIdempotentShutdown } from '../../shared/src/shutdown.js';
 import { createProducerApp } from './app.js';
 
 async function main(): Promise<void> {
@@ -17,39 +18,133 @@ async function main(): Promise<void> {
   const channel = await connection.createConfirmChannel();
   await channel.assertExchange(config.rabbitmq.exchange, 'topic', { durable: true });
 
-  const channelAdapter: ConfirmChannelLike = {
-    publish: (exchange, routingKey, content, options) =>
-      channel.publish(exchange, routingKey, content, options),
-    waitForConfirms: () => channel.waitForConfirms(),
-  };
-  const publisher = new RabbitEventPublisher(channelAdapter, config.rabbitmq.exchange);
+  const publisher = new RabbitEventPublisher(
+    confirmChannelAdapter(channel),
+    config.rabbitmq.exchange,
+  );
   const app = await createProducerApp({
     logger: { level: config.logLevel },
     publisher,
   });
 
+  let channelOpen = true;
+  let connectionOpen = true;
+  let intentionalShutdown = false;
+
   channel.on('close', () => {
+    channelOpen = false;
+    if (!intentionalShutdown) {
+      app.log.error('RabbitMQ channel closed unexpectedly');
+    }
+  });
+  channel.on('error', (error) => {
     publisher.markUnavailable();
+    app.log.error({ errorType: error.name }, 'RabbitMQ channel error');
+  });
+  connection.on('close', () => {
+    connectionOpen = false;
+    publisher.markUnavailable();
+    if (!intentionalShutdown) {
+      app.log.error('RabbitMQ connection closed unexpectedly');
+    }
+  });
+  connection.on('error', (error) => {
+    publisher.markUnavailable('RabbitMQ connection error during publication.', error);
+    app.log.error({ errorType: error.name }, 'RabbitMQ connection error');
   });
 
-  const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
-    app.log.info({ signal }, 'Shutting down producer');
-    await app.close();
-    await channel.close();
-    await connection.close();
+  const shutdown = createIdempotentShutdown(async (reason) => {
+    intentionalShutdown = true;
+    app.log.info({ signal: reason }, 'Shutting down producer');
+    publisher.markUnavailable();
+    const deadline = createDeadline(config.shutdownTimeoutMs);
+
+    try {
+      const serverClosed = await deadline.run(async () => {
+        await app.close();
+      });
+      if (!serverClosed) {
+        app.log.error(
+          { operation: 'server.close', timeoutMs: config.shutdownTimeoutMs },
+          'Producer server close exceeded the shutdown deadline',
+        );
+      }
+    } catch (error) {
+      app.log.error(
+        {
+          errorType: error instanceof Error ? error.name : 'UnknownError',
+        },
+        'Producer server close failed during shutdown',
+      );
+    }
+
+    if (channelOpen) {
+      channelOpen = false;
+      try {
+        const closed = await deadline.run(async () => {
+          await channel.close();
+        });
+        if (!closed) {
+          app.log.error(
+            {
+              operation: 'channel.close',
+              timeoutMs: config.shutdownTimeoutMs,
+            },
+            'RabbitMQ channel close exceeded the shutdown deadline',
+          );
+        }
+      } catch (error) {
+        app.log.error(
+          {
+            errorType: error instanceof Error ? error.name : 'UnknownError',
+          },
+          'RabbitMQ channel close failed during shutdown',
+        );
+      }
+    }
+
+    if (connectionOpen) {
+      connectionOpen = false;
+      try {
+        const closed = await deadline.run(async () => {
+          await connection.close();
+        });
+        if (!closed) {
+          app.log.error(
+            {
+              operation: 'connection.close',
+              timeoutMs: config.shutdownTimeoutMs,
+            },
+            'RabbitMQ connection close exceeded the shutdown deadline',
+          );
+        }
+      } catch (error) {
+        app.log.error(
+          {
+            errorType: error instanceof Error ? error.name : 'UnknownError',
+          },
+          'RabbitMQ connection close failed during shutdown',
+        );
+      }
+    }
+  });
+  const requestShutdown = (reason: string): void => {
+    void shutdown(reason).catch((error: unknown) => {
+      app.log.error(
+        {
+          errorType: error instanceof Error ? error.name : 'UnknownError',
+        },
+        'Producer shutdown failed',
+      );
+      process.exitCode = 1;
+    });
   };
 
   process.once('SIGINT', () => {
-    void shutdown('SIGINT').catch((error: unknown) => {
-      app.log.error({ err: error }, 'Producer shutdown failed');
-      process.exitCode = 1;
-    });
+    requestShutdown('SIGINT');
   });
   process.once('SIGTERM', () => {
-    void shutdown('SIGTERM').catch((error: unknown) => {
-      app.log.error({ err: error }, 'Producer shutdown failed');
-      process.exitCode = 1;
-    });
+    requestShutdown('SIGTERM');
   });
 
   await app.listen({ host: '0.0.0.0', port: config.port });

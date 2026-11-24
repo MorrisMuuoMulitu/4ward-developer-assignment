@@ -1,5 +1,5 @@
 import { parseCityGroupJoinedEvent } from './contracts.js';
-import { isRetryableError } from './errors.js';
+import { InvalidRetryMetadataError, isRetryableError } from './errors.js';
 
 export const RETRY_COUNT_HEADER = 'x-retry-count';
 
@@ -48,19 +48,31 @@ export interface ProcessConsumerMessageOptions {
 
 export type ProcessOutcome = 'success' | 'retry' | 'dead-letter' | 'requeued';
 
-function retryCountFromHeaders(headers: Readonly<Record<string, unknown>>): number {
+function retryCountFromHeaders(headers: Readonly<Record<string, unknown>>): number | null {
   const raw = headers[RETRY_COUNT_HEADER];
 
-  if (typeof raw === 'number' && Number.isInteger(raw) && raw >= 0) {
+  if (raw === undefined) {
+    return 0;
+  }
+
+  if (typeof raw === 'number' && Number.isSafeInteger(raw) && raw >= 0) {
     return raw;
   }
 
-  if (typeof raw === 'string') {
+  if (typeof raw === 'string' && /^(0|[1-9]\d*)$/.test(raw)) {
     const parsed = Number(raw);
-    return Number.isInteger(parsed) && parsed >= 0 ? parsed : 0;
+    return Number.isSafeInteger(parsed) ? parsed : null;
   }
 
-  return 0;
+  return null;
+}
+
+function withoutRetryCount(
+  headers: Readonly<Record<string, unknown>>,
+): Readonly<Record<string, unknown>> {
+  return Object.fromEntries(
+    Object.entries(headers).filter(([name]) => name !== RETRY_COUNT_HEADER),
+  );
 }
 
 /**
@@ -89,6 +101,24 @@ export async function processConsumerMessage(
   const retryCount = retryCountFromHeaders(delivery.headers);
   let event: ReturnType<typeof parseCityGroupJoinedEvent>;
 
+  if (retryCount === null) {
+    const error = new InvalidRetryMetadataError(
+      'The retry-count header must be a non-negative safe integer.',
+    );
+    logger.error(
+      { errorType: error.name, queue: queues.main },
+      'Dead-lettering event with invalid retry metadata',
+    );
+    return routeToDeadLetter({
+      ...options,
+      delivery,
+      error,
+      headers: withoutRetryCount(delivery.headers),
+      publisher,
+      reason: 'invalid-retry-count',
+    });
+  }
+
   try {
     const parsed: unknown = JSON.parse(delivery.body.toString('utf8'));
     event = parseCityGroupJoinedEvent(parsed);
@@ -97,7 +127,16 @@ export async function processConsumerMessage(
       { errorType: errorType(error), queue: queues.main, retryCount },
       'Dead-lettering invalid CityGroupJoined event',
     );
-    return routeToDeadLetter({ ...options, delivery, error: error, publisher, retryCount });
+    return routeToDeadLetter({
+      ...options,
+      delivery,
+      error,
+      headers: {
+        ...delivery.headers,
+        [RETRY_COUNT_HEADER]: retryCount,
+      },
+      publisher,
+    });
   }
 
   try {
@@ -169,8 +208,11 @@ export async function processConsumerMessage(
       ...options,
       delivery,
       error,
+      headers: {
+        ...delivery.headers,
+        [RETRY_COUNT_HEADER]: retryCount,
+      },
       publisher,
-      retryCount,
     });
   }
 }
@@ -178,8 +220,9 @@ export async function processConsumerMessage(
 type DeadLetterOptions = ProcessConsumerMessageOptions & {
   readonly delivery: ConsumerDelivery;
   readonly error: unknown;
+  readonly headers: Readonly<Record<string, unknown>>;
   readonly publisher: ConfirmedQueuePublisher;
-  readonly retryCount: number;
+  readonly reason?: string;
 };
 
 async function routeToDeadLetter(options: DeadLetterOptions): Promise<ProcessOutcome> {
@@ -188,8 +231,8 @@ async function routeToDeadLetter(options: DeadLetterOptions): Promise<ProcessOut
       options.queues.deadLetter,
       options.delivery.body,
       {
-        ...options.delivery.headers,
-        [RETRY_COUNT_HEADER]: options.retryCount,
+        ...options.headers,
+        ...(options.reason === undefined ? {} : { 'x-error-reason': options.reason }),
         'x-error-type': errorType(options.error),
       },
       { persistent: true },
@@ -199,7 +242,7 @@ async function routeToDeadLetter(options: DeadLetterOptions): Promise<ProcessOut
       {
         errorType: errorType(options.error),
         queue: options.queues.deadLetter,
-        retryCount: options.retryCount,
+        ...(options.reason === undefined ? {} : { reason: options.reason }),
       },
       'Dead-letter publication confirmed',
     );

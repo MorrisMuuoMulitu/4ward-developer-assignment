@@ -9,6 +9,7 @@ async function main(): Promise<void> {
     apiKey: requireExternalValue(config.external.airtableApiKey, 'AIRTABLE_API_KEY'),
     baseId: requireExternalValue(config.external.airtableBaseId, 'AIRTABLE_BASE_ID'),
     tableName: config.external.airtableTableName,
+    timeoutMs: config.external.requestTimeoutMs,
   });
 
   await runConsumerProcess({ destination: 'airtable', handler });

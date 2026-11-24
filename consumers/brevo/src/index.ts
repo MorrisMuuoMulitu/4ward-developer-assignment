@@ -7,6 +7,7 @@ async function main(): Promise<void> {
   const config = parseRuntimeConfig(process.env);
   const handler = createBrevoHandler({
     apiKey: requireExternalValue(config.external.brevoApiKey, 'BREVO_API_KEY'),
+    timeoutMs: config.external.requestTimeoutMs,
   });
 
   await runConsumerProcess({ destination: 'brevo', handler });

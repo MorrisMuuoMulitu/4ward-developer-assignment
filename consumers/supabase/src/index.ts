@@ -10,6 +10,7 @@ async function main(): Promise<void> {
       config.external.supabaseSecretKey ?? config.external.supabaseServiceRoleKey,
       'SUPABASE_SECRET_KEY or SUPABASE_SERVICE_ROLE_KEY',
     ),
+    timeoutMs: config.external.requestTimeoutMs,
     url: requireExternalValue(config.external.supabaseUrl, 'SUPABASE_URL'),
   });
 

@@ -28,10 +28,17 @@ export class ConfigurationError extends TerminalError {
 }
 
 /**
+ * A malformed retry header cannot be interpreted safely and must not restart the retry budget.
+ */
+export class InvalidRetryMetadataError extends TerminalError {
+  public override readonly name: string = 'InvalidRetryMetadataError';
+}
+
+/**
  * Classifies an external HTTP response using the service's retry contract.
  */
 export function errorForHttpStatus(service: string, status: number): Error {
-  if (status === 429 || status >= 500) {
+  if (status === 408 || status === 429 || status >= 500) {
     return new RetryableError(`${service} returned retryable HTTP status ${String(status)}.`);
   }
 

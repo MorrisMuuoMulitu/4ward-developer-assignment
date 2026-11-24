@@ -1,12 +1,18 @@
 import type { CityGroupJoinedEvent } from '../../../shared/src/contracts.js';
-import { errorForHttpStatus, RetryableError } from '../../../shared/src/errors.js';
+import { errorForHttpStatus } from '../../../shared/src/errors.js';
+import {
+  DEFAULT_EXTERNAL_REQUEST_TIMEOUT_MS,
+  fetchWithTimeout,
+  type FetchLike,
+} from '../../../shared/src/http.js';
 import { transformForBrevo } from './transform.js';
 
-export type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
+export type { FetchLike } from '../../../shared/src/http.js';
 
 interface BrevoHandlerConfig {
   readonly apiKey: string;
   readonly fetch?: FetchLike;
+  readonly timeoutMs?: number;
 }
 
 /**
@@ -16,12 +22,13 @@ export function createBrevoHandler(
   config: BrevoHandlerConfig,
 ): (event: CityGroupJoinedEvent) => Promise<void> {
   const fetchImplementation = config.fetch ?? fetch;
+  const timeoutMs = config.timeoutMs ?? DEFAULT_EXTERNAL_REQUEST_TIMEOUT_MS;
 
   return async (event) => {
-    let response: Response;
-
-    try {
-      response = await fetchImplementation('https://api.brevo.com/v3/contacts', {
+    const response = await fetchWithTimeout(
+      fetchImplementation,
+      'https://api.brevo.com/v3/contacts',
+      {
         body: JSON.stringify(transformForBrevo(event)),
         headers: {
           Accept: 'application/json',
@@ -29,12 +36,10 @@ export function createBrevoHandler(
           'api-key': config.apiKey,
         },
         method: 'POST',
-      });
-    } catch (error) {
-      throw new RetryableError('Brevo request failed at the network layer.', {
-        cause: error,
-      });
-    }
+      },
+      'Brevo',
+      timeoutMs,
+    );
 
     if (response.status === 201 || response.status === 204) {
       return;
