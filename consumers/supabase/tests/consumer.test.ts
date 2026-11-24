@@ -22,6 +22,7 @@ interface RecordedRequest {
   readonly body: string | undefined;
   readonly headers: RequestInit['headers'];
   readonly method: string;
+  readonly signal: RequestInit['signal'];
   readonly url: string;
 }
 
@@ -31,6 +32,7 @@ function createSupabaseFetch(response: Response, requests: RecordedRequest[]) {
       body: typeof init?.body === 'string' ? init.body : undefined,
       headers: init?.headers,
       method: init?.method ?? 'GET',
+      signal: init?.signal,
       url,
     });
     return Promise.resolve(response);
@@ -63,6 +65,7 @@ describe('Supabase consumer', () => {
     await handler(event);
 
     expect(requests).toHaveLength(1);
+    expect(requests[0]?.signal).toBeInstanceOf(AbortSignal);
     expect(requests[0]?.url).toBe(
       'https://example.supabase.co/rest/v1/city_group_members?on_conflict=event_id',
     );
@@ -89,5 +92,25 @@ describe('Supabase consumer', () => {
     });
 
     await expect(handler(event)).rejects.toBeInstanceOf(RetryableError);
+  });
+
+  it('classifies TimeoutError as a retryable timeout', async () => {
+    const timeoutError = new Error('request timed out');
+    timeoutError.name = 'TimeoutError';
+    const fetch = (_url: string, init?: RequestInit): Promise<Response> => {
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      return Promise.reject(timeoutError);
+    };
+    const handler = createSupabaseHandler({
+      fetch,
+      secretKey: 'supabase-test-key',
+      timeoutMs: 250,
+      url: 'https://example.supabase.co',
+    });
+
+    await expect(handler(event)).rejects.toMatchObject({
+      message: 'Supabase request timed out.',
+      name: 'RetryableError',
+    });
   });
 });

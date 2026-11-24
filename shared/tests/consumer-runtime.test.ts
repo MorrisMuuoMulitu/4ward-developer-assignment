@@ -212,6 +212,77 @@ describe('consumer message processing', () => {
     expect(outcome).toBe('requeued');
     expect(message.actions).toEqual(['nack:true']);
   });
+
+  it('requeues the original message when DLQ routing cannot be confirmed', async () => {
+    const message = delivery();
+    const publisher: ConfirmedQueuePublisher = {
+      publish: () => Promise.reject(new RetryableError('Queue is not bound')),
+    };
+
+    const outcome = await processConsumerMessage({
+      ...baseOptions,
+      delivery: message,
+      handler: () => Promise.reject(new TerminalError('Permanent destination failure')),
+      publisher,
+    });
+
+    expect(outcome).toBe('requeued');
+    expect(message.actions).toEqual(['nack:true']);
+  });
+
+  it.each([
+    ['negative number', -1],
+    ['fractional number', 1.5],
+    ['unsafe integer', Number.MAX_SAFE_INTEGER + 1],
+    ['NaN', Number.NaN],
+    ['negative string', '-1'],
+    ['fractional string', '1.5'],
+    ['non-numeric string', 'invalid'],
+    ['blank string', ''],
+  ])('dead-letters invalid retry metadata: %s', async (_label, retryCount) => {
+    const message = delivery({ [RETRY_COUNT_HEADER]: retryCount });
+    const publisher = new RecordingPublisher();
+    let invoked = false;
+
+    const outcome = await processConsumerMessage({
+      ...baseOptions,
+      delivery: message,
+      handler: () => {
+        invoked = true;
+        return Promise.resolve();
+      },
+      publisher,
+    });
+
+    expect(outcome).toBe('dead-letter');
+    expect(invoked).toBe(false);
+    expect(publisher.calls[0]?.queue).toBe(queues.deadLetter);
+    expect(publisher.calls[0]?.headers).toMatchObject({
+      'x-error-reason': 'invalid-retry-count',
+      'x-error-type': 'InvalidRetryMetadataError',
+    });
+    expect(publisher.calls[0]?.headers[RETRY_COUNT_HEADER]).toBeUndefined();
+    expect(message.actions).toEqual(['ack']);
+  });
+
+  it.each([
+    [0, 1],
+    [1, 2],
+  ])('routes retry count %i to retry count %i before the maximum', async (retryCount, next) => {
+    const message = delivery({ [RETRY_COUNT_HEADER]: retryCount });
+    const publisher = new RecordingPublisher();
+
+    const outcome = await processConsumerMessage({
+      ...baseOptions,
+      delivery: message,
+      handler: () => Promise.reject(new RetryableError('Temporary outage')),
+      publisher,
+    });
+
+    expect(outcome).toBe('retry');
+    expect(publisher.calls[0]?.headers[RETRY_COUNT_HEADER]).toBe(next);
+    expect(message.actions).toEqual(['ack']);
+  });
 });
 
 describe('retry delay', () => {

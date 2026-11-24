@@ -125,6 +125,8 @@ describe('runtime configuration', () => {
       RETRY_INITIAL_DELAY_MS: '500',
       RETRY_MAX_DELAY_MS: '5000',
       CONSUMER_PREFETCH: '3',
+      EXTERNAL_REQUEST_TIMEOUT_MS: '9000',
+      SHUTDOWN_TIMEOUT_MS: '8000',
     });
 
     expect(config.retry).toEqual({
@@ -134,6 +136,8 @@ describe('runtime configuration', () => {
     });
     expect(config.rabbitmq.exchange).toBe('city-group.events');
     expect(config.consumerPrefetch).toBe(3);
+    expect(config.external.requestTimeoutMs).toBe(9000);
+    expect(config.shutdownTimeoutMs).toBe(8000);
   });
 
   it('accepts a Supabase secret key for server-side integration', () => {
@@ -144,5 +148,21 @@ describe('runtime configuration', () => {
 
     expect(config.external.supabaseSecretKey).toBe('sb_secret_test');
     expect(config.external.supabaseServiceRoleKey).toBeUndefined();
+  });
+
+  it('applies network and shutdown timeout defaults', () => {
+    const config = parseRuntimeConfig({});
+
+    expect(config.external.requestTimeoutMs).toBe(15_000);
+    expect(config.shutdownTimeoutMs).toBe(10_000);
+  });
+
+  it.each([
+    { EXTERNAL_REQUEST_TIMEOUT_MS: '0' },
+    { EXTERNAL_REQUEST_TIMEOUT_MS: '120001' },
+    { SHUTDOWN_TIMEOUT_MS: '0' },
+    { SHUTDOWN_TIMEOUT_MS: '60001' },
+  ])('rejects invalid timeout configuration %o', (environment) => {
+    expect(() => parseRuntimeConfig(environment)).toThrow('Environment configuration is invalid.');
   });
 });

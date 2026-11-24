@@ -21,6 +21,7 @@ const event: CityGroupJoinedEvent = {
 interface RecordedRequest {
   readonly body: string | undefined;
   readonly method: string;
+  readonly signal: RequestInit['signal'];
   readonly url: string;
 }
 
@@ -29,6 +30,7 @@ function createAirtableFetch(responses: readonly Response[], requests: RecordedR
     requests.push({
       body: typeof init?.body === 'string' ? init.body : undefined,
       method: init?.method ?? 'GET',
+      signal: init?.signal,
       url,
     });
     const response = responses[requests.length - 1];
@@ -79,6 +81,7 @@ describe('Airtable consumer', () => {
     await handler(event);
 
     expect(requests).toHaveLength(2);
+    expect(requests.every((request) => request.signal instanceof AbortSignal)).toBe(true);
     const lookupUrl = new URL(requests[0]?.url ?? '');
     expect(lookupUrl.searchParams.get('filterByFormula')).toBe(
       "{Event ID}='7eec8d9b-ee33-4bdf-a63c-0bd9377fbde6'",
@@ -126,5 +129,27 @@ describe('Airtable consumer', () => {
     const handler = createAirtableHandler({ ...config, fetch });
 
     await expect(handler(event)).rejects.toBeInstanceOf(TerminalError);
+  });
+
+  it('applies a timeout signal and classifies TimeoutError as retryable', async () => {
+    const requests: RecordedRequest[] = [];
+    const timeoutError = new Error('request timed out');
+    timeoutError.name = 'TimeoutError';
+    const fetch = (url: string, init?: RequestInit): Promise<Response> => {
+      requests.push({
+        body: typeof init?.body === 'string' ? init.body : undefined,
+        method: init?.method ?? 'GET',
+        signal: init?.signal,
+        url,
+      });
+      return Promise.reject(timeoutError);
+    };
+    const handler = createAirtableHandler({ ...config, fetch, timeoutMs: 250 });
+
+    await expect(handler(event)).rejects.toMatchObject({
+      message: 'Airtable request timed out.',
+      name: 'RetryableError',
+    });
+    expect(requests[0]?.signal).toBeInstanceOf(AbortSignal);
   });
 });

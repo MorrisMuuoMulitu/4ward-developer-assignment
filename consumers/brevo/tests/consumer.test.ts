@@ -22,6 +22,7 @@ interface RecordedRequest {
   readonly body: string | undefined;
   readonly headers: RequestInit['headers'];
   readonly method: string;
+  readonly signal: RequestInit['signal'];
   readonly url: string;
 }
 
@@ -31,6 +32,7 @@ function createBrevoFetch(response: Response, requests: RecordedRequest[]) {
       body: typeof init?.body === 'string' ? init.body : undefined,
       headers: init?.headers,
       method: init?.method ?? 'GET',
+      signal: init?.signal,
       url,
     });
     return Promise.resolve(response);
@@ -63,6 +65,7 @@ describe('Brevo consumer', () => {
     await handler(event);
 
     expect(requests).toHaveLength(1);
+    expect(requests[0]?.signal).toBeInstanceOf(AbortSignal);
     expect(requests[0]?.url).toBe('https://api.brevo.com/v3/contacts');
     expect(requests[0]?.method).toBe('POST');
     expect(JSON.parse(requests[0]?.body ?? '{}')).toEqual({
@@ -97,5 +100,20 @@ describe('Brevo consumer', () => {
     const handler = createBrevoHandler({ apiKey: 'brevo-test-key', fetch });
 
     await expect(handler(event)).rejects.toBeInstanceOf(TerminalError);
+  });
+
+  it('classifies AbortError as a retryable timeout', async () => {
+    const abortError = new Error('request aborted');
+    abortError.name = 'AbortError';
+    const fetch = (_url: string, init?: RequestInit): Promise<Response> => {
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      return Promise.reject(abortError);
+    };
+    const handler = createBrevoHandler({ apiKey: 'brevo-test-key', fetch, timeoutMs: 250 });
+
+    await expect(handler(event)).rejects.toMatchObject({
+      message: 'Brevo request timed out.',
+      name: 'RetryableError',
+    });
   });
 });

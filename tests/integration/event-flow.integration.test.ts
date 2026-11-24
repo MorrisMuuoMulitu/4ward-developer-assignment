@@ -12,10 +12,7 @@ import { createProducerApp } from '../../producer/src/app.js';
 import type { CityGroupJoinedEvent } from '../../shared/src/contracts.js';
 import type { MessageLogger } from '../../shared/src/consumer-runtime.js';
 import { RetryableError } from '../../shared/src/errors.js';
-import {
-  RabbitEventPublisher,
-  type ConfirmChannelLike,
-} from '../../shared/src/rabbit-publisher.js';
+import { confirmChannelAdapter, RabbitEventPublisher } from '../../shared/src/rabbit-publisher.js';
 import { declareConsumerTopology, startQueueConsumer } from '../../shared/src/rabbit-consumer.js';
 import {
   topologyFor,
@@ -163,14 +160,6 @@ function destinationFetch(baseUrl: string) {
   };
 }
 
-function confirmAdapter(channel: ConfirmChannel): ConfirmChannelLike {
-  return {
-    publish: (exchange, routingKey, content, options) =>
-      channel.publish(exchange, routingKey, content, options),
-    waitForConfirms: () => channel.waitForConfirms(),
-  };
-}
-
 async function startConsumers(
   exchange: string,
   api: MockApi,
@@ -215,6 +204,7 @@ async function startConsumers(
       prefetch: 1,
       retryInitialDelayMs: 75,
       retryMaxDelayMs: 250,
+      shutdownTimeoutMs: 1000,
       topology,
     });
     connections.push(connection);
@@ -303,7 +293,7 @@ describe('live RabbitMQ event flow', () => {
     const connection = await connect(rabbitUrl);
     const producerChannel = await connection.createConfirmChannel();
     const consumers = await startConsumers(exchange, api);
-    const publisher = new RabbitEventPublisher(confirmAdapter(producerChannel), exchange);
+    const publisher = new RabbitEventPublisher(confirmChannelAdapter(producerChannel), exchange);
     const app: FastifyInstance = await createProducerApp({ logger: false, publisher });
     const address = await app.listen({ host: '127.0.0.1', port: 0 });
 
@@ -385,10 +375,11 @@ describe('live RabbitMQ event flow', () => {
       prefetch: 1,
       retryInitialDelayMs: 50,
       retryMaxDelayMs: 50,
+      shutdownTimeoutMs: 1000,
       topology,
     });
 
-    const publisher = new RabbitEventPublisher(confirmAdapter(producerChannel), exchange);
+    const publisher = new RabbitEventPublisher(confirmChannelAdapter(producerChannel), exchange);
     await publisher.publish({
       event: 'CityGroupJoined',
       eventId: randomUUID(),
@@ -449,10 +440,11 @@ describe('live RabbitMQ event flow', () => {
       prefetch: 1,
       retryInitialDelayMs: 50,
       retryMaxDelayMs: 50,
+      shutdownTimeoutMs: 1000,
       topology,
     });
 
-    const publisher = new RabbitEventPublisher(confirmAdapter(producerChannel), exchange);
+    const publisher = new RabbitEventPublisher(confirmChannelAdapter(producerChannel), exchange);
     await publisher.publish({
       event: 'CityGroupJoined',
       eventId: randomUUID(),
@@ -478,5 +470,104 @@ describe('live RabbitMQ event flow', () => {
     await stopping;
     expect(stopped).toBe(true);
     expect((await producerChannel.checkQueue(topology.queues.main)).messageCount).toBe(0);
+  });
+
+  it('rejects a mandatory publication when no destination queue is bound', async () => {
+    const exchange = `city-group.events.unroutable.${randomUUID()}`;
+    const connection = await connect(rabbitUrl);
+    const channel = await connection.createConfirmChannel();
+    cleanup = async () => {
+      await channel.deleteExchange(exchange);
+      await channel.close();
+      await connection.close();
+    };
+    await channel.assertExchange(exchange, 'topic', { durable: true });
+    const publisher = new RabbitEventPublisher(confirmChannelAdapter(channel), exchange);
+
+    await expect(
+      publisher.publish({
+        event: 'CityGroupJoined',
+        eventId: randomUUID(),
+        timestamp: new Date().toISOString(),
+        data: {
+          name: 'Unroutable User',
+          email: 'unroutable@example.com',
+          city: 'Nairobi',
+          country: 'Kenya',
+          interests: [],
+        },
+      }),
+    ).rejects.toMatchObject({
+      message: 'RabbitMQ could not route the event to a destination queue.',
+      name: 'RetryableError',
+    });
+  });
+
+  it('stops waiting at the shutdown deadline and requeues an unacknowledged delivery', async () => {
+    const exchange = `city-group.events.shutdown-deadline.${randomUUID()}`;
+    const connection = await connect(rabbitUrl);
+    const producerChannel = await connection.createConfirmChannel();
+    const consumerConnection = await connect(rabbitUrl);
+    const consumerChannel = await consumerConnection.createConfirmChannel();
+    const topology = topologyFor(exchange, 'supabase');
+    const started = signal();
+    const finish = signal();
+    let consumerChannelOpen = true;
+    let consumerConnectionOpen = true;
+
+    cleanup = async () => {
+      if (consumerChannelOpen) await consumerChannel.close();
+      await deleteTopologies(producerChannel, [topology]);
+      await producerChannel.close();
+      if (consumerConnectionOpen) await consumerConnection.close();
+      await connection.close();
+    };
+
+    await declareConsumerTopology(producerChannel, topology);
+    const subscription = await startQueueConsumer({
+      channel: consumerChannel,
+      handler: async () => {
+        started.resolve();
+        await finish.promise;
+      },
+      logger: silentLogger,
+      maxRetryAttempts: 2,
+      prefetch: 1,
+      retryInitialDelayMs: 50,
+      retryMaxDelayMs: 50,
+      shutdownTimeoutMs: 100,
+      topology,
+    });
+
+    const publisher = new RabbitEventPublisher(confirmChannelAdapter(producerChannel), exchange);
+    await publisher.publish({
+      event: 'CityGroupJoined',
+      eventId: randomUUID(),
+      timestamp: new Date().toISOString(),
+      data: {
+        name: 'Shutdown Deadline User',
+        email: 'shutdown-deadline@example.com',
+        city: 'Nairobi',
+        country: 'Kenya',
+        interests: [],
+      },
+    });
+    await started.promise;
+
+    const startedAt = Date.now();
+    await subscription.stop();
+    const elapsedMs = Date.now() - startedAt;
+
+    expect(elapsedMs).toBeGreaterThanOrEqual(80);
+    expect(elapsedMs).toBeLessThan(1_000);
+
+    finish.resolve();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    await consumerChannel.close();
+    consumerChannelOpen = false;
+    await consumerConnection.close();
+    consumerConnectionOpen = false;
+    await waitForCount(producerChannel, topology.queues.main, 1);
   });
 });
