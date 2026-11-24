@@ -1,111 +1,80 @@
 # Verification Evidence
 
-Add evidence of your completed implementation here.
-
-Examples:
-
-- Screenshots
-- Relevant test output
-- Manual verification notes
-
-Document at least one successful end-to-end flow and one retry/failure scenario.
+This repository is verified with unit/behavioral tests and a live RabbitMQ integration suite.
+External destination APIs are represented by local HTTP mocks in automated tests.
 
 ## Automated broker integration
 
 Verified on 2026-11-24 with `pnpm test:integration` against the RabbitMQ
 `4.4.1-management-alpine` container from `docker-compose.yml`.
 
-Result:
-
-```text
-Test Files  1 passed (1)
-Tests       3 passed (3)
-```
-
 The integration suite verifies:
 
-1. A real Fastify HTTP request publishes one event through a durable topic exchange into three
+1. A real Fastify request publishes one event through a durable topic exchange into three
    independent destination queues.
-2. Mocked Airtable, Brevo, and Supabase HTTP endpoints receive the transformed records.
-3. A forced HTTP `500` from Airtable is routed through its retry queue and succeeds on the next
-   attempt while Brevo and Supabase process independently.
-4. With `MAX_RETRY_ATTEMPTS=0`, a retryable failure reaches the destination DLQ with
-   `x-error-type: RetryableError` and `x-retry-count: 0`.
-5. Consumer shutdown cancels new intake and drains an in-flight delivery before closing its
-   channel.
+2. Airtable, Brevo, and Supabase HTTP adapters receive transformed records from local mock servers.
+3. A failed Airtable lookup is retried while Brevo and Supabase continue independently.
+4. Retry exhaustion reaches a durable destination DLQ.
+5. Mandatory publishing rejects an event when no destination queue is bound.
+6. A consumer shutdown deadline stops waiting without acknowledging an in-flight delivery; closing
+   the channel causes RabbitMQ to requeue it.
+7. Consumer shutdown otherwise drains in-flight work before closing the channel.
+8. Concurrent producer publications with the same event ID use unique AMQP message IDs and do not
+   interfere when one is returned.
+9. Concurrent consumer confirmations use unique per-attempt IDs, and returned or negatively
+   confirmed publications reject without acknowledging the original delivery.
 
-Each test uses a unique exchange and destination queues. The suite deletes those durable resources
-after every scenario. A post-run RabbitMQ management API check reported `Remaining test queues: 0`
-and `Remaining test exchanges: 0`.
+Each integration test uses unique durable resources and removes them during teardown. A post-run
+management API check confirms zero remaining test queues and exchanges.
 
-## Live external service verification
+## Current hardening verification scope
 
-### Happy path: verified
+The automated suite does not claim live external API verification. Automated tests never contact
+Airtable, Brevo, or Supabase. A separate post-hardening manual smoke registration is documented
+below. Live credentials remain only in the ignored local `.env`.
 
-Verified on 2026-11-24 with the real producer, RabbitMQ, and all three consumers.
+## Pre-hardening live external verification
 
-```text
-GET /health  -> 200 {"status":"ok","rabbitmq":"ready"}
-GET /        -> 200 text/html
-POST /api/join -> 202
-eventId -> 9354c080-c813-4958-9c75-1a3c4e5b05a1
-```
+The following records were captured before the hardening pass and are retained as historical
+evidence. They are not results from the current mocked/local automated suite.
 
-The submitted values were Jane Doe, `jane.4ward.verify@example.com`, London, United Kingdom, and
-`["Technology", "Climate"]`. All consumers acknowledged successfully.
+### Happy path: verified pre-hardening
 
-- Airtable returned the expected record `rechM1eplVuoWoZQQ` with matching `Name`, `Email`, `City`,
-  `Country`, `Interests = "Technology, Climate"`, and `Event ID`.
-- Brevo returned contact `3` with matching `NAME`, `CITY`, and `COUNTRY` attributes.
-- Supabase returned row `7d3ea957-035a-4733-9d44-c5493b106a21` with matching `event_id`, fields,
-  generated `id` and `created_at`, and JSONB interests `["Technology","Climate"]`.
+A synthetic Jane Doe submission for London, United Kingdom, with Technology and Climate interests
+returned HTTP `202` for event
+`9354c080-c813-4958-9c75-1a3c4e5b05a1`:
 
-### Existing-contact update: verified
+- Airtable record `rechM1eplVuoWoZQQ` matched the submitted fields and event ID.
+- Brevo contact `3` matched `NAME`, `CITY`, and `COUNTRY`.
+- Supabase row `7d3ea957-035a-4733-9d44-c5493b106a21` matched the event ID and stored JSONB
+  interests.
 
-A second submission for the same email produced event `f03e520e-685f-4e3a-accf-9460c147c365`.
-It changed the city to Manchester and interests to `["Design"]`.
+### Existing-contact update: verified pre-hardening
 
-- Airtable created record `rechGEX3MMwuGb5UW`.
-- Brevo preserved contact `3` and updated `CITY` to `Manchester`.
-- Supabase created row `5b2054e9-3bd2-4e1e-aca6-f507938149f1`.
-- An equivalent direct Brevo update returned the expected HTTP `204`.
+Event `f03e520e-685f-4e3a-accf-9460c147c365` reused the same email and updated Brevo contact `3`
+with HTTP `204`. It created Airtable record `rechGEX3MMwuGb5UW` and Supabase row
+`5b2054e9-3bd2-4e1e-aca6-f507938149f1`.
 
-### Failure isolation: verified
+### Failure isolation: verified pre-hardening
 
-The Brevo consumer was stopped while Airtable, Supabase, and the producer remained running. A new
-submission returned HTTP `202` for event `d879f5b8-45c2-462e-b5c2-3b4133afdf53`.
+With Brevo stopped, event `d879f5b8-45c2-462e-b5c2-3b4133afdf53` created Airtable record
+`recXZtI2dZzh3LiS6` and Supabase row `3ef64bf8-191d-4a7c-83aa-96c080cc1073`. RabbitMQ held one
+message in the Brevo queue with zero consumers; restarting Brevo drained it and created contact
+`4` for the synthetic isolation email with `CITY = Bristol`.
 
-- Airtable immediately created record `recXZtI2dZzh3LiS6`.
-- Supabase immediately created row `3ef64bf8-191d-4a7c-83aa-96c080cc1073`.
-- RabbitMQ reported `messages_ready=1` and `consumers=0` for `city-group.events.brevo`.
-- After Brevo restarted, the queue drained to zero and contact `4` was created for
-  `isolation.check.4ward@example.com` with `CITY = Bristol`.
+### Retry exhaustion and recovery: verified pre-hardening
 
-### Retry exhaustion and recovery: verified
-
-The healthy Supabase consumer was replaced temporarily by a child process using only a test-local
-override pointing at an unreachable URL. The repository `.env` was not changed. Event
-`c7272a76-3b03-47b8-8568-e05830cd3663` produced this sanitized retry sequence:
-
-```text
-attempt 1: retryCount=0, RetryableError, scheduled nextRetryCount=1, delayMs=1000
-attempt 2: retryCount=1, RetryableError, scheduled nextRetryCount=2, delayMs=2000
-attempt 3: retryCount=2, RetryableError, scheduled nextRetryCount=3, delayMs=2000
-attempt 4: retryCount=3, RetryableError, Dead-letter publication confirmed
-```
-
-The Supabase DLQ message contained `x-error-type: RetryableError` and `x-retry-count: 3`; the
-message was inspected and acknowledged during cleanup. Airtable stored record
-`recUukkLoBPrOzVaZ` and Brevo stored contact `5`, proving the failing Supabase path did not block
-the other destinations.
-
-The normal Supabase consumer was then restored. A new event
-`73a69f8d-85a7-4c68-a2bd-90ed8829abf3` succeeded and produced Supabase row
+With a temporary test-local Supabase URL override, event
+`c7272a76-3b03-47b8-8568-e05830cd3663` retried at 1000 ms, 2000 ms, and 2000 ms before its fourth
+attempt dead-lettered to `city-group.events.supabase.dlq` with `x-retry-count: 3`. Airtable
+record `recUukkLoBPrOzVaZ` and Brevo contact `5` succeeded independently. Restored Supabase
+configuration processed event `73a69f8d-85a7-4c68-a2bd-90ed8829abf3` into row
 `9e9e8837-6692-4396-a314-3d052809aeb5`.
 
-### Graceful shutdown: verified
+### Graceful shutdown: verified pre-hardening
 
-The producer and each consumer were stopped directly with `SIGINT`. Sanitized log excerpts:
+Sanitized `SIGINT` records were captured for the producer and all three consumers before shutdown
+deadline hardening.
 
 ```text
 {"service":"airtable-consumer","signal":"SIGINT","msg":"Shutting down consumer"}
@@ -114,39 +83,54 @@ The producer and each consumer were stopped directly with `SIGINT`. Sanitized lo
 {"service":"producer","signal":"SIGINT","msg":"Shutting down producer"}
 ```
 
-### Screenshot placeholders
+## Post-Hardening Live Smoke Test
 
-Optional browser and dashboard images can be added under `docs/screenshots/`. Do not include API
-keys, browser devtools headers, or other secret values in screenshots. See
-[`docs/screenshots/README.md`](screenshots/README.md) for the intended filenames.
+Executed on 2026-11-24 at 18:14 EAT, after the final hardening changes and after the complete
+offline verification gate passed.
+
+- Producer health: HTTP `200`
+- Registration: HTTP `202`
+- Event ID: `ea7256d4-274e-4fb6-a80f-ad384f41817d`
+- Airtable record: `rec5hlokOC0D9lXm2`
+- Brevo contact: `7`
+- Supabase row: `a9597da1-229f-456c-b525-7d3fdf71f1f7`
+
+Each destination was independently queried through its API. The event ID and synthetic
+registration fields matched in Airtable, Brevo, and Supabase.
+
+The producer, Airtable consumer, Brevo consumer, and Supabase consumer each logged their `SIGINT`
+shutdown sequence and exited within the configured deadline. No unhandled rejection or forced
+termination was observed. RabbitMQ was then stopped with `docker compose down`.
+
+No destination failure or deviation occurred.
+
+### Sanitized dashboard screenshots
+
+The supplied screenshots are included unmodified:
+
+![Airtable post-hardening record](screenshots/airtable-record.png)
+
+[Airtable record link](https://airtable.com/appXO7nJouokpVZtj/tblZmGNViEwOVs00y/viwytdx7QG2wZG56S/rec5hlokOC0D9lXm2)
+
+![Brevo post-hardening contact](screenshots/brevo-contact.png)
+
+![Supabase post-hardening row](screenshots/supabase-row.png)
 
 ## Final repository checks
 
-Verified on 2026-11-24:
+Verified on 2026-11-24 after the hardening pass:
 
 ```text
-pnpm build                 -> exit 0
-pnpm typecheck             -> exit 0
-pnpm lint                  -> exit 0
-pnpm format:check          -> All matched files use Prettier code style
-pnpm test                  -> 7 files passed, 37 tests passed
-pnpm test:integration      -> 1 file passed, 3 tests passed
-docker compose config      -> exit 0
-pnpm audit --prod          -> No known vulnerabilities found
+pnpm build             -> exit 0
+pnpm typecheck         -> exit 0
+pnpm lint              -> exit 0
+pnpm format:check      -> All matched files use Prettier code style
+pnpm test              -> 11 files passed, 78 tests passed
+pnpm test:integration  -> 1 file passed, 5 tests passed
+docker compose config  -> exit 0
+pnpm audit --prod      -> No known vulnerabilities found
 ```
 
-Manual runtime smoke check with RabbitMQ running:
-
-```text
-GET /health       -> 200 {"status":"ok","rabbitmq":"ready"}
-GET /             -> 200 text/html
-POST /api/join    -> 202 {"status":"accepted","eventId":"..."}
-```
-
-The form was rendered at desktop `1440x1100` and mobile `390x844`. Both layouts kept the heading,
-form controls, and primary action readable and operable without horizontal overflow.
-
-Final secret scanning confirmed the live API keys exist only in the ignored `.env`, with no
-credential values in tracked content. It also found no unsafe casts, TypeScript `any` usage,
-non-null assertions, unfinished markers, or whitespace errors. `node_modules` and `dist` are
-ignored by Git. `Architecture.md` and `CASE_STUDY.md` retain their original content and headings.
+Compose configuration resolves RabbitMQ host bindings to `127.0.0.1` for both ports. The
+post-integration RabbitMQ management check reported zero remaining test queues and zero remaining
+test exchanges.
